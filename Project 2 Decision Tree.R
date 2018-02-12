@@ -112,7 +112,7 @@ generate.dt <- function(df, target,                 # data frame and classificat
   
   # calculate current entropy of target
   current.entropy <- calcEntropy(df[[target]])
-  
+  if(is.nan(current.entropy)){current.entropy = 0}
   # if entropy is 0 or we're down to the classification column
   # we are at a leaf. Otherwise we need to branch
   if(current.entropy == 0 | ncol(df) == 1){
