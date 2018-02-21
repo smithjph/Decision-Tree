@@ -1,369 +1,270 @@
-library(plyr)
-library(igraph)
 
 # this downloads and unzips the dataset
-temp <- tempfile()
-download.file("http://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip",temp, mode="wb")
-unzip(temp, "bank-full.csv")
-unlink(temp)
+ temp <- tempfile()
+ download.file("http://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip",temp, mode="wb")
+ unzip(temp, "bank-full.csv")
+ unlink(temp)
+#setwd("~/taoj@mail.gvsu.edu/gvsu/course/CIS678/Bank Marketing by Decision Tree/data/bank")
 bank <- read.table("bank-full.csv", sep=";", header=T)
-str(bank)
-# subset for quick testing
-bank1 <- bank[1:100,]
 
-
-# class example for checking against a known calculation
-wind = c('strong','weak','strong','strong','strong','weak','weak','strong','strong','strong','weak','weak','strong','weak')
-water = c('warm','warm','warm','moderate','cold','cold','cold','moderate','cold','moderate','moderate','moderate','warm','moderate')
-air = c('warm','warm','warm','warm','cool','cool','cool','warm','cool','cool','cool','warm','cool','warm')
-forecast = c('sunny','sunny','cloudy','rainy','rainy','rainy','sunny','sunny','sunny','rainy','sunny','sunny','sunny','rainy')
-oracle = c('yes','no','yes','yes','no','no','no','yes','yes','no','yes','yes','yes','no')
-example = data.frame(wind, water, air, forecast, oracle)
-
-
-# check for missing values
-sum(is.na(bank))
-
-
-# put duration and pdays into dummy variables
-#bank$pdaysBin = as.numeric(bank$pdays <= 374)
-
-
-# function to calculate entropy
-calcEntropy = function(S){
-  if(!is.factor(S)) S = as.factor(S)
-  
-  p = prop.table(table(S))
-  
-  -sum(sapply(levels(S), function(name) p[name] * log2(p[name])))
+library(data.tree)
+# check the pure, the class should be last column
+IsPure <- function(data) {
+  length(unique(data[,ncol(data)])) == 1
 }
 
-
-# function to calculate gain, partition.by is the feature and target is the y
-calcGain = function(partition.by, target){
-  partition.table = table(partition.by, target)
-  
-  row.sums = as.vector(rowSums(partition.table))
-  
-  prob = partition.table / row.sums
-  
-  ent = -prob * log2(prob)
-  
-  # define 0 * log2(0) = 0
-  ent[is.na(ent)] = 0
-  
-  info.gain = calcEntropy(target) - sum(ent * (row.sums / sum(row.sums)))
-  
-  return(info.gain)
+# check the entropoy``
+Entropy <- function( vls ) {
+  res <- vls/sum(vls) * log2(vls/sum(vls))
+  res[vls == 0] <- 0
+  -sum(res)
 }
 
-
-entropy.partition = function(df, target){
-  # extract column names
-  cols <- names(df)
-  # filter out target
-  candidates <- cols[!(cols == target)]
-  
-  # calculate entropy gain when partitioning target by each candidate
-  gain <- NULL
-  for(col in candidates){
-    gain <- c(gain, calcGain(df[[col]], df[[target]]))
-  }
-  names(gain) <- candidates
-  
-  # select the candidate that returns the max information gain
-  # in case of a tie, select the first candidate in the list
-  max.candidate <- names(which(gain == max(gain))[1])
-  
-  return(list('max' = max.candidate,
-              'info.gain' = gain))
+# cal gain
+InformationGain <- function( tble ) {
+  tble <- as.data.frame.matrix(tble)
+  entropyBefore <- Entropy(colSums(tble))
+  s <- rowSums(tble)
+  entropyAfter <- sum (s / sum(s) * apply(tble, MARGIN = 1, FUN = Entropy ))
+  informationGain <- entropyBefore - entropyAfter
+  return (informationGain)
 }
 
-
-predict.outcome <- function(outcome.vector, threshold, majority){
+# retrun p of majority  in a given vector
+predict.outcome <- function(outcome.vector){
   # Predict class based on outcome.vector
   
   # Determine possible outcomes and percentage occurrence
   outcomes <- unique(outcome.vector)
   outcome.counts <- rep(0, length(outcomes))
   names(outcome.counts) <- as.character(outcomes)
+  # count num for each element in vecotr
   for(item in names(outcome.counts)){
     outcome.counts[item] <- sum(outcome.vector == item)
   }
+  # calc P
   outcome.counts <- outcome.counts / sum(outcome.counts)
-  
-  # if the prediction, based on max outcome.counts, is greater than the threshold
   # return prediction based on max outcome counts
-  # otherwise, go with the simple majority
-  if(max(outcome.counts) >= threshold){
-    max.index <- which(outcome.counts == max(outcome.counts))
-    return(list('predict' = names(outcome.counts)[max.index],
-                'margin'  = max(outcome.counts)))
-  } else{
-    return(majority)
-  }
+  max.index <- which(outcome.counts == max(outcome.counts))
+  return(list('predict' = names(outcome.counts)[max.index][1],
+              'margin'  = max(outcome.counts)))
+}
+# find the initial node
+rootNode = function(data){
+  ig <- sapply(colnames(data)[-ncol(data)], 
+               function(x) InformationGain(
+                 table(data[,x], data[,ncol(data)])
+               )
+  )
+  feature <- names(ig)[ig == max(ig)][1]
+  return(feature)
 }
 
-
-generate.dt <- function(df, target,                 # data frame and classification col
-                        threshold, majority,        # dealing with clashes
-                        g, parent.id, split.by,     # graph constuction
-                        depth){    
-  
-  # calculate current entropy of target
-  current.entropy <- calcEntropy(df[[target]])
-  if(is.nan(current.entropy)){current.entropy = 0}
-  # if entropy is 0 or we're down to the classification column
-  # we are at a leaf. Otherwise we need to branch
-  if(current.entropy == 0 | ncol(df) == 1){
-    outcome <- predict.outcome(df[[target]], threshold, majority)
-    # name of node = classification(s)
-    node.name <- paste(outcome$predict, round(outcome$margin, 2), sep="::")
-    node.type <- 'leaf'
-  } else{
-    # determine the next column to split by
-    node.name <- entropy.partition(df, target)[[1]]
-    node.type <- 'branch'
+# train model
+TrainID3 <- function(node, data, thredhold, purity) {
+  node$obsCount <- nrow(data)
+  # set the purity to nodes
+  node$purity <- predict.outcome(data[,ncol(data)])$margin
+  #if the data-set is pure, then
+  if (IsPure(data)) {
+    #construct a leaf having the name of the pure feature
+    child <- node$AddChild(unique(data[,ncol(data)]))
+    child$purity <- 1
+    node$feature <- tail(names(data), 1)
+    child$obsCount <- nrow(data)
+    child$feature <- ''
   }
-  
-  # add node
-  g <- g + vertex(node.name, type=node.type, set.size=nrow(df), depth=depth)
-  node.id <- length(V(g))
-  # add edge from parent to node (unless parent.id empty)
-  if(parent.id != ''){
-    # edge name is the value we are splitting by
-    g <- g + edge(c(parent.id, node.id), name=split.by)
+  # no attribute can be used for spliting or less then threshold num
+  else if(ncol(data)==1 | nrow(data)<thredhold | node$purity>purity)
+  {
+    predict <- predict.outcome(data[,ncol(data)])
+    child <- node$AddChild(predict$predict)
+    child$purity <- predict$margin
+    node$feature <- tail(names(data), 1)
+    child$obsCount <- nrow(data)
+    child$feature <- ''
+
   }
-  
-  # if we're at a branch
-  if(node.type == 'branch'){
-    # get branch values
-    unique.values <- unique(df[[node.name]])
-    # filter out 
-    col.filter <- !(names(df) %in% node.name)
-    split.df <- df[ , col.filter, drop=FALSE]
-    for(value in unique.values){
-      new.df <- split.df[df[node.name] == value, , drop=FALSE]
-      g <- generate.dt(new.df, target, 
-                       threshold, majority,
-                       g, node.id, value,
-                       depth=depth + 1)
-    }
-  }
-  E(g)$label <- E(g)$name
-  return(g)
-}
-
-
-train.dt <- function(df, target, threshold){
-  # initialize graph
-  g <- graph.empty()
-  # calculate a simple majority classification rule
-  majority <- predict.outcome(df[[target]], 0, list())
-  
-  # add these as graph attributes
-  g$target <- target
-  g$threshold <- threshold
-  g$majority <- majority
-  depth <- 1
-  
-  g <- generate.dt(df, target, 
-                   threshold, majority,
-                   g, '', '',
-                   depth)
-  
-  V(g)$label <- paste0(V(g)$name, " (", V(g)$set.size, ")")
-  return(g)
-}
-
-
-follow.dt <- function(obs, g, current.node){
-  # if the curent node is a 'leaf' make a prediction
-  # just need to spit out extra support information
-  if(V(g)[current.node]$type == 'leaf'){
-    return(strsplit(V(g)[current.node]$name, split="::")[[1]][1])
-  }
-  
-  # otherwise, move on to the next node
-  
-  # get column to split on from name of current node
-  split.on <- obs[V(g)[current.node]$name]
-  # determine which edge to follow
-  for(edge in E(g)[from(current.node)]){
-    if(E(g)[edge]$name == split.on){
-      # we found the edge we match, follow to next node
-      next.node <- V(g)[to(E(g)[edge])]
-      return(follow.dt(obs, g, next.node))
-    }
-  }
-}
-
-
-predict.dt <- function(df, g){
-  # initialize output vector
-  outcome.vector <- c()
-  
-  # start at the root node
-  root.node <- 1
-  
-  # for each row (observation) in the dataset, use g to make a prediction
-  for(n in 1:nrow(df)){
-    obs <- df[n, ]
-    outcome.vector <- c(outcome.vector, follow.dt(obs, g, root.node))
-  }
-  return(outcome.vector)
-}
-
-
-path.constructor <- function(g, target.node){
-  # get the edges from the root to the target node
-  p <- get.shortest.paths(g, from=1, to=target.node, output='epath')
-  
-  # initialize return value
-  path.list <- list()
-  
-  # for each edge in path, add to path.list c(origin node name, edge name)
-  for(e in p$epath[[1]]){
-    # end points of edge: [1] towared root, [2] away from root
-    end.points <- get.edge(g, e)
-    path.list <- c(path.list, list(c( V(g)[end.points[1]]$name, E(g)[e]$name )))
-  }
-  return(path.list)
-}
-
-
-node.filter <- function(g, target.node){
-  df.filter <- paste(lapply(path.constructor(g, target.node),
-                            function(i) {paste0(i[1],
-                                                " == ",
-                                                "'", i[2], "'")}),
-                     collapse=" & ")
-  return(df.filter)
-}
-
-
-fast.predict <- function(df, g){
-  df$prediction.column <- rep(NA, nrow(df))
-  for(leaf in V(g)[V(g)$type == 'leaf']){
-    predict <- strsplit(V(g)[leaf]$name, split="::")[[1]][1]
-    f <- node.filter(g, leaf)
+  else {
+    #choose the feature with the highest information gain
+    ig <- sapply(colnames(data)[-ncol(data)], 
+                    function(x) InformationGain(
+                      table(data[,x], data[,ncol(data)])
+                    )
+    )
+    feature <- names(ig)[ig == max(ig)][1]
     
-    attach(df)
-    df[eval(parse(text = f)), 'prediction.column'] <- predict
-    detach(df)
-  }
-  return(df$prediction.column)
-}
-
-
-prune.tree <- function(g, df){  
-  # calculate prune.static.error and
-  #           prune.weight for all nodes in graph
-  for(ver in V(g)){
-    f <- node.filter(g, ver)
-    if(f == ""){
-      node.df <- df
-    } else{
-      node.df <- with(df, df[eval(parse(text = f)), ])
-    }
+    node$feature <- feature
     
-    V(g)[ver]$prune.weight <- nrow(node.df)
-    
-    node.prediction <- predict.outcome(node.df[[g$target]], 
-                                       g$threshold, g$majority)$predict
-    st.err <- sum(node.prediction != node.df[[g$target]]) / V(g)[ver]$prune.weight
-    
-    V(g)[ver]$prune.static.error <- st.err
-    V(g)[ver]$prune.predict <- node.prediction
-  }
-  
-  # get all pruning candidates
-  leaf.parents <- V(g)[ nei( V(g)[which(V(g)$type == 'leaf')] ) ]
-  
-  prune.targets <- c()
-  for(node in leaf.parents){
-    ds.neighbors <- V(g)[ nei(node, mode='out')]
-    if(all(V(g)[ nei(node, mode='out')]$type == 'leaf')){
-      prune.targets <- c(prune.targets, node)
+    #take the subset of the data-set having that feature value
+    childObs <- split(data[,!(names(data) %in% feature)], data[,feature], drop = TRUE)
+    for(i in 1:length(childObs)) {
+      #construct a child having the name of that feature value
+      # child <- node$AddChild(paste(feature,":",names(childObs)[i]))
+      child <- node$AddChild(names(childObs)[i])
+      #if(class(childObs[[i]])=="factor"){childObs[[i]] <-as.data.frame(childObs[[i]])}
+      childObs[[i]] <-as.data.frame(childObs[[i]])
+      #call the algorithm recursively on the child and the subset      
+      TrainID3(child, childObs[[i]], thredhold,purity)
     }
   }
-  
-  # for each pruning candidate
-  for(n in prune.targets){
-    # calculate backed-up error
-    bkd.up.err <- 0
-    for(c in neighbors(g, n, mode='out')){
-      bkd.up.err <- bkd.up.err + (V(g)[c]$prune.weight * V(g)[c]$prune.static.error)
-    }
-    bkd.up.err <- bkd.up.err / V(g)[n]$prune.weight
-    
-    # if static error < backed-up error prune
-    if(V(g)[n]$prune.static.error < bkd.up.err){
-      # prune
-      # delete leaves
-      delete.vertices(g, neighbors(g, n, mode='out'))
-      
-      # Create new leaf
-      V(g)[n]$type <- 'leaf'
-      V(g)[n]$name <- paste(V(g)[n]$prune.predict, 
-                            round(V(g)[n]$prune.static.error, 2), sep="::")
+}
+
+# prediction
+Predict <- function(tree, features) {
+  if (tree$children[[1]]$isLeaf) {
+    return (tree$children[[1]]$name)}
+  child <- tree$children[[as.character(features[tree$feature][[1]])]]
+  if(is.null(child)){
+    return ("unknow")}
+  return ( Predict(child, features))
+}
+
+# automatic bin
+binconti <- function(df, conti.name, class.name){
+  subdf <- df[,c(conti.name,class.name)]
+  # sort by continus numbers ascedently
+  subdf <- subdf[order(subdf[,conti.name],subdf[,class.name]),]
+  # find the split point
+  temp <- subdf[1, class.name] # save previous point
+  enthropy.orgi <- Entropy(table(subdf[,class.name]))
+  rownum <- nrow(subdf)
+  # record gain and split point
+  gain <- NULL
+  splitpoint <- NULL
+  for(i in 2: rownum){
+    if(temp != subdf[i, class.name]){
+      # calculate inforgain
+      enthropy1 <- Entropy(table(subdf[1:i-1,class.name]))
+      enthropy2 <- Entropy(table(subdf[i:rownum,class.name]))
+      gain <- append(gain,enthropy.orgi - ((i-1)/rownum)*enthropy1 - ((rownum-i+1)/rownum)*enthropy2)
+      splitpoint <- append(splitpoint, subdf[i,conti.name])
+      temp <- subdf[i,class.name] # change to new class
     }
   }
-  return(g)
+  point <- cbind(splitpoint, gain)
+  return (point)
 }
 
+# start to prepare date
+#bank <- read.table("bank-full.csv", sep=";", header=T)
+# bin for age
+# banktemp <-bank
+# bank <-banktemp
 
-prune.dt <- function(g, df){
-  delta <- 1
-  while(delta > 0){
-    starting.num <- vcount(g)
-    g <- prune.tree(g, df)
-    delta <- starting.num - vcount(g)
+# bank$age <- cut(bank$age, breaks=c(-Inf, 20,30, 40,50,60,Inf), 
+#                 labels=c("~20","21~30","31~40","41~50","51~60","6~"))
+# bank$age <- cut(bank$age, breaks=c(-Inf, 30,55,Inf), 
+#                 labels=c("~30","31~60","55~"))
+# 
+# partition.table = table(bank$age,bank$y)
+# row.sums = as.vector(rowSums(partition.table))
+# prob = partition.table / row.sums
+# mosaicplot(partition.table , shade = T, xlab = "age", ylab = "y", main = "Mosaic Plot")
+
+# check for point to split continuous variables at
+p<-binconti(bank, "age","y")
+plot(p)
+bank$age = cut(bank$age, breaks=c(-Inf, 61, Inf), labels=c("<61",">=61"))
+summary(bank$age)
+
+# bin for balance
+p<-binconti(bank, "balance","y")
+plot(p)
+
+summary(bank$balance)
+bank$balance <- cut(bank$balance, breaks=c(-Inf, 72,Inf),
+                    labels=c("<72",">=72"))
+summary(bank$balance)
+
+partition.table = table(bank$balance,bank$y)
+row.sums = as.vector(rowSums(partition.table))
+prob = partition.table / row.sums
+mosaicplot(partition.table , shade = T, xlab = "balance", ylab = "y", main = "Mosaic Plot")
+
+# bin for pday
+table(bank$pdays)  # too many nosie, skip
+p<-binconti(bank, "pdays","y")
+plot(p)
+
+# start to build tree
+# plot correlation matrix to determine related attributes
+pairs(~y+month+contact+duration+pdays, data=bank)
+pairs(~y+day+campaign+previous, data=bank)
+
+# delete unrelated attribute
+MyData = subset(bank,select = -c(month,contact,duration,pdays,day,campaign,previous))
+
+# split to training and test data
+MyData <- MyData[sample(1:nrow(MyData)),]
+MyTest <- MyData[40001:45211,]
+MyTrain <- MyData[1:40000,]
+library(ROSE)
+
+# oversampling training data
+MyTrain <- ovun.sample(y ~ ., data = MyTrain, method = "both",N = 40000, p=0.5, seed=1)$data
+
+MyTrain <- MyTrain[sample(1:nrow(MyData)),]
+
+MyTrain <- MyTrain[MyTrain$y %in% c("yes","no"),]
+
+# cross-validation
+library(caret)
+
+# set the sample thredhold and purity threhold
+threshold.sample <- c(2000)
+threshold.purity <- c(0.9)
+# set error matrix for recording validation error
+error.matrix <- matrix(rep(0,length(threshold.purity)*length(threshold.sample)),
+                           nrow=length(threshold.sample),ncol=length(threshold.purity))
+colnames(error.matrix) <- threshold.purity
+rownames(error.matrix) <- threshold.sample
+for(s in 1:length(threshold.sample)){
+  for(p in 1:length(threshold.purity)){
+    set.seed(1)
+    # set fold 10
+    fold = 10
+    idx <- createFolds(c(1:dim(MyTrain)[1]), k=fold)
+    error <- rep(0,fold)
+    # k fold
+    for (i in 1:fold){
+      # split training and validation datale
+      learn    <- MyTrain[-idx[[i]], ]
+      x.valid    <- MyTrain[idx[[i]], ]
+      y.valid    <- MyTrain[idx[[i]], ncol(MyTrain)]
+      # traning
+      bankNode = rootNode(bank)
+      tree <- Node$new(bankNode)
+      TrainID3(tree, learn,threshold.sample[s],threshold.purity[p])
+      # validation
+      result <- rep(0,nrow(x.valid))
+      for(row in 1:nrow(x.valid)){
+        result[row]  <-  Predict(tree,x.valid[row,])
+      }
+      error[i] <- mean(result!=y.valid)
+    }
+    error.matrix[s,p] <- mean(error)
   }
-  return(g)
 }
+#View(error.matrix)
+plot(tree)
 
-
-pretty.plot <- function(g){
-  layout <- layout.reingold.tilford(g)
-  # rotate
-  layout <- layout[ , c(2, 1)]
-  # flip
-  layout[ ,1] <- max(layout[ ,1]) - layout[ ,1, drop=FALSE]
-  # stretch
-  layout[ ,1] <- layout[ ,1] * layout[ ,1]
-  
-  plot(g, layout=layout, asp=0,
-       vertex.shape='rectangle', vertex.size=20, vertex.size2=10,
-       vertex.color='white', vertex.frame.color='white',
-       edge.label.color='red', edge.arrow.size=0.3)
+# test
+# the test data is not over sampling
+MyTest.x <- MyTest[,-ncol(MyTest)]
+MyTest.y <- MyTest[,ncol(MyTest)]
+result.test <- rep(0,nrow(MyTest.x))
+for(row in 1:nrow(MyTest.x)){
+  result.test[row]  <-  Predict(tree,MyTest.x[row,])
 }
+error.test <- mean(result.test!=MyTest.y)
+print(error.test)
 
 
+# plot errors
+library(ggplot2)
+thresh.sample = c(100,1000,1500,2000,2500,5000,7000,10000,20000,30000,40000)
+validation.error = c(.9914,.7640,.3451,.3017,.3532,.3282,.3280,.3706,.3885,.3996,.4979)
+errordf = data.frame(thresh.sample, validation.error)
 
-
-
-
-# ID3 function
-#ID3 = function(attributes, target){
-#  # check if all examples are of same class
-#  if(length(unique(target))<=1){
-#    leaf = names(which.max(table(target)))
-#  }
-#  # if there are no more attributes to test
-#  if(length(attributes) <= 0){
-#    leaf = names(which.max(table(target)))
-#  }
-#  else {
-#    # find the attribute with highest gain
-#    max_gain = 0
-#    for(attr in attributes){
-#      new_gain = calcGain(attr, target)
-#      if(new_gain > max_gain){
-#        max_gain = new_gain
-#        best_attr = attr
-#      }
-#    }
-#  }
-#}
-
+ggplot(data=errordf, aes(x=thresh.sample, y=validation.error)) + geom_line() + geom_point()
