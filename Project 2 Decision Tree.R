@@ -20,7 +20,7 @@ Entropy <- function( vls ) {
   -sum(res)
 }
 
-# cal gain
+# calc gain
 InformationGain <- function( tble ) {
   tble <- as.data.frame.matrix(tble)
   entropyBefore <- Entropy(colSums(tble))
